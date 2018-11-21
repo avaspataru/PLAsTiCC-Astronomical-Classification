@@ -36,8 +36,6 @@ def main():
 
     print "Formatting data"
     training_set_data = training_set_metadata_raw.drop('target',axis=1)
-    training_set_data = training_set_data.drop('hostgal_specz',axis=1)
-    training_set_data = training_set_data.drop('hostgal_photoz',axis=1)
     training_set_data = training_set_data.drop('distmod',axis=1)
 
     training_set_raw['flux_ratio_sq'] = np.power(training_set_raw['flux'] / training_set_raw['flux_err'], 2.0)
@@ -80,10 +78,32 @@ def main():
     full_train_ids = full_train['object_id']
     full_train = full_train.drop('object_id', axis=1)
 
+    print full_train.columns
+
+    print "Split extragalactic "
+    extra = np.where(full_train['hostgal_photoz']==0.0)
+    extragalactic_data = full_train.drop(full_train.index[extra])
+    extragalactic_targets = training_set_targets.drop(training_set_targets.index[extra])
+
+    extragalactic_data = scale(extragalactic_data)
+    print "Model for extra:"
+    clf = RandomForestClassifier(n_jobs=2, random_state=0)
+    print cross_val_score(clf, extragalactic_data, extragalactic_targets, cv=10, scoring="neg_log_loss").mean()
+
+    print "Split intragalactic "
+    intra = np.where(full_train['hostgal_photoz']!=0.0)
+    intragalactic_data = full_train.drop(full_train.index[intra])
+    intragalactic_targets = training_set_targets.drop(training_set_targets.index[intra])
+
+    intragalactic_data = scale(intragalactic_data)
+    print "Model for intra:"
+    clf = RandomForestClassifier(n_jobs=2, random_state=0)
+    print cross_val_score(clf, intragalactic_data, intragalactic_targets, cv=10, scoring="neg_log_loss").mean()
+
 
     full_train = scale(full_train)
-
     print "Training model"
+    clf = RandomForestClassifier(n_jobs=2, random_state=0)
     clf = RandomForestClassifier(n_jobs=2, random_state=0)
     #clf.fit(training_set_data, training_set_targets.values.ravel())
     print cross_val_score(clf, full_train, training_set_targets, cv=10, scoring="neg_log_loss").mean()
