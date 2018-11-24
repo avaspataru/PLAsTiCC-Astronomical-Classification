@@ -38,7 +38,6 @@ def splitGalaxies(dataFrame, targets):
     extra_ids = extragalactic_data['object_id']
     extragalactic_data = extragalactic_data.drop('object_id',axis=1)
     extragalactic_targets = targets.drop(targets.index[extra])
-    extragalactic_data = scale(extragalactic_data)
 
 
     print "Split intragalactic "
@@ -48,13 +47,13 @@ def splitGalaxies(dataFrame, targets):
     intragalactic_data = intragalactic_data.drop('object_id',axis=1)
     intragalactic_targets = targets.drop(targets.index[intra])
 
-    intragalactic_data = scale(intragalactic_data)
     #return extragalactic_data, extragalactic_targets, extra_ids, intragalactic_data, intragalactic_targets, intra_ids
     return extragalactic_data, extragalactic_targets,extra_ids, intragalactic_data, intragalactic_targets, intra_ids
 
 
 def format(set_metadata_raw, set_raw):
 
+    set_metadata_raw = fill_in_hostgal_specz(set_metadata_raw)
     set_data = set_metadata_raw.drop('distmod',axis=1)
 
     set_raw['flux_ratio_sq'] = np.power(set_raw['flux'] / set_raw['flux_err'], 2.0)
@@ -164,6 +163,91 @@ def fill_in_hostgal_specz(dataFrame):
     df['hostgal_specz'] = df['hostgal_photoz']
     return df
 
+def my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_metadata_raw, extra_model, intra_model):
+
+    formatted_columns = [u'object_id', u'mjd_size', u'flux_by_flux_ratio_sq_sum',
+   u'flux_by_flux_ratio_sq_skew', u'flux_ratio_sq_sum',
+   u'flux_ratio_sq_skew', u'flux_err_min', u'flux_err_max',
+   u'flux_err_mean', u'flux_err_median', u'flux_err_std', u'flux_err_skew',
+   u'flux_min', u'flux_max', u'flux_mean', u'flux_median', u'flux_std',
+   u'flux_skew', u'detected_mean', u'passband_min', u'passband_max',
+   u'passband_mean', u'passband_median', u'passband_std', u'mjd_diff',
+   u'flux_diff', u'flux_dif2', u'flux_w_mean', u'flux_dif3', u'ra',
+   u'decl', u'gal_l', u'gal_b', u'ddf', u'hostgal_specz',
+   u'hostgal_photoz', u'hostgal_photoz_err', u'mwebv']
+
+    finish = pd.DataFrame(columns=column_names)
+
+    batch_extra_dataFrame = pd.DataFrame(columns = formatted_columns)
+    batch_intra_dataFrame = pd.DataFrame(columns = formatted_columns)
+
+    my_extra_meta_batch = pd.DataFrame(columns = test_set_metadata_raw.columns)
+    my_intra_meta_batch = pd.DataFrame(columns = test_set_metadata_raw.columns)
+    my_extra_data_batch = pd.DataFrame(columns = ['object_id', 'mjd', 'passband', 'flux', 'flux_err', 'detected'])
+    my_intra_data_batch = pd.DataFrame(columns = ['object_id', 'mjd', 'passband', 'flux', 'flux_err', 'detected'])
+
+
+
+    my_extra_data_batch = pd.concat(my_extra_data_list)
+    my_intra_data_batch = pd.concat(my_intra_data_list)
+
+    tt1 = test_set_metadata_raw.loc[test_set_metadata_raw['object_id'].isin(my_extra_data_batch['object_id'].values.tolist())]
+    if(len(my_extra_data_batch.index)>0):
+        batch_extra_dataFrame= format(tt1, my_extra_data_batch)
+    else:
+        batch_extra_dataFrame = pd.DataFrame(columns = formatted_columns)
+    tt2 = test_set_metadata_raw.loc[test_set_metadata_raw['object_id'].isin(my_intra_data_batch['object_id'].values.tolist())]
+    if(len(my_intra_data_batch.index)>0):
+        batch_intra_dataFrame= format(tt2, my_intra_data_batch)
+    else:
+        batch_intra_dataFrame = pd.DataFrame(columns = formatted_columns)
+
+    extra_ans = []
+    intra_ans = []
+    objids = [[]]
+    print " >>Predicting extra"
+    if(len(batch_extra_dataFrame.index)>0):
+        objids1 = batch_extra_dataFrame['object_id'].values.tolist()
+
+        objids = []
+        for id in objids1:
+            l1 = [id]
+            objids.append(l1)
+        batch_extra_dataFrame = batch_extra_dataFrame.drop('object_id', axis=1)
+        extra_ans = extra_model.predict_proba(batch_extra_dataFrame)
+        #print extra_model.classes_
+        z = np.zeros((len(extra_ans),6)) # zeros for intra classes and class 99
+        extra_ans = np.append(extra_ans,z,axis=1)
+        extra_ans = np.append(objids,extra_ans,axis=1)
+    print " >>Predicting intra"
+    objids = [[]]
+    if(len(batch_intra_dataFrame.index)>0):
+        objids1 = batch_intra_dataFrame['object_id'].values.tolist()
+        objids = []
+        for id in objids1:
+            l1 = [id]
+            objids.append(l1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('object_id', axis=1)
+        intra_ans = intra_model.predict_proba(batch_intra_dataFrame)
+        #print intra_model.classes_
+        z = np.zeros((len(intra_ans),9)) # zeros for extra classes and class 99
+        intra_ans = np.append(z,intra_ans,axis=1)
+        z1 = np.zeros((len(intra_ans),1))
+        intra_ans = np.append(intra_ans,z1,axis=1)
+        intra_ans = np.append(objids,intra_ans,axis=1)
+
+    print " >>Putting together"
+    arr = []
+    if((len(batch_extra_dataFrame.index)>0) and (len(batch_intra_dataFrame.index)>0) ):
+        arr = np.concatenate((extra_ans,intra_ans), axis=0)
+    else:
+        if (len(batch_intra_dataFrame.index)>0):
+            arr = intra_ans
+        else:
+            if (len(batch_extra_dataFrame.index)>0):
+                arr = extra_ans
+    return arr
+
 def main():
 
     mode = 1 #0-cv, 1-predict
@@ -230,129 +314,71 @@ def main():
             className = "class_" + str(classi)
             column_names.append(className)
         column_names.append("class_99")
-        lst = []
+
+        print column_names
         count = 0
         batch_no = 0
-        batch_list = []
+        batch_extra_dataFrame = pd.DataFrame()
+        batch_intra_dataFrame = pd.DataFrame()
+        myextrabatchlist = []
+        myintrabatchlist = []
+
+        test_set_metadata_raw = fill_in_hostgal_specz(test_set_metadata_raw)
+
+
         print " >Starting new batch 0"
+
+        my_extra_data_list = []
+        my_intra_data_list = []
+
+        cc=-1
         for obj_id, d in get_objects_by_id(filepath):
-            batch_list.append((obj_id,d))
-            if(count == 2):
+            cc=cc+1
+            #combined = format(test_set_metadata_raw.loc[test_set_metadata_raw['object_id']==obj_id],d)
+            if (obj_id in extra_ids):
+                my_extra_data_list.append(d) # = np.append(my_extra_data_list, d)
+            else:
+                my_intra_data_list.append(d) #= np.append(my_intra_data_list, d)
+            if(count == 10000):
                 print " >>Formatting batch objects"
-                batch_extra_dataFrame = pd.DataFrame()
-                batch_intra_dataFrame = pd.DataFrame()
-                myextrabatchlist = []
-                myintrabatchlist = []
-                for object_id, df in batch_list:
-                    combined = format(fill_in_hostgal_specz(test_set_metadata_raw.loc[test_set_metadata_raw['object_id']==object_id]),df)
-                    #combined = combined.drop('object_id',axis=1)
-                    combined = scale(combined) #combined is a df with one row for this object id
-                    if (object_id in extra_ids):
-                        myextrabatchlist.append(combined.values[0])
-                    else:
-                        myintrabatchlist.append(combined.values[0])
-                batch_extra_dataFrame= pd.DataFrame(myextrabatchlist,columns=combined.columns)
-                batch_intra_dataFrame= pd.DataFrame(myintrabatchlist,columns=combined.columns)
-                extra_ans = []
-                intra_ans = []
-                objids = [[]]
-                print " >>Predicting extra"
-                if(len(batch_extra_dataFrame.index)>0):
-                    objids1 = batch_extra_dataFrame['object_id'].values.tolist()
-
-                    objids = []
-                    for id in objids1:
-                        l1 = [id]
-                        print l1
-                        objids.append(l1)
-                        print objids
-                    batch_extra_dataFrame = batch_extra_dataFrame.drop('object_id', axis=1)
-                    extra_ans = extra_model.predict_proba(batch_extra_dataFrame)
-                    z = np.zeros((len(extra_ans),6)) # zeros for intra classes and class 99
-                    print extra_ans
-                    print z
-                    extra_ans = np.append(extra_ans,z,axis=1)
-                    print extra_ans
-                    print objids
-                    extra_ans = np.append(objids,extra_ans,axis=1)
-                print " >>Predicting intra"
-                objids = [[]]
-                if(len(batch_intra_dataFrame.index)>0):
-                    objids1 = batch_intra_dataFrame['object_id'].values.tolist()
-
-                    objids = []
-                    for id in objids1:
-                        l1 = [id]
-                        print l1
-                        objids.append(l1)
-                        print objids
-                    batch_intra_dataFrame = batch_intra_dataFrame.drop('object_id', axis=1)
-                    intra_ans = intra_model.predict_proba(batch_intra_dataFrame)
-                    z = np.zeros((len(intra_ans),10)) # zeros for extra classes and class 99
-                    intra_ans = np.append(z,intra_ans,axis=1)
-                    intra_ans = np.append(objids,intra_ans,axis=1)
-
-                print extra_ans
-                print intra_ans
-                print " >>Putting together"
-                arr = []
-                if((len(batch_extra_dataFrame.index)>0) and (len(batch_intra_dataFrame.index)>0) ):
-                    arr = np.concatenate((extra_ans,intra_ans), axis=0)
-                else:
-                    if (len(batch_intra_dataFrame.index)>0):
-                        arr = intra_ans
-                    else:
-                        if (len(batch_extra_dataFrame.index)>0):
-                            arr = extra_ans
-
+                arr = my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_metadata_raw, extra_model, intra_model)
                 print " >>Write to csv"
                 finish = pd.DataFrame(arr, columns=column_names)
-                print finish
-                print finish
                 if(batch_no==0):
                     finish.to_csv("predictions.csv", index = False, header = True)
                 else:
                     with open('predictions.csv', 'a') as f:
                         finish.to_csv(f, index = False, header=False)
-                break
 
-                #index = 0
-                #row= []
-                #row.append(object_id)
-                #if object_id in extra_ids:
-                #    ans = extra_model.predict_proba(combined)
-                #    for classi in extra_classes:
-                #        row.append(ans[:,index][0])
-                #        index = index + 1
-                #    for classi in intra_classes:
-                #        row.append(0.0)
-
-                #else:
-                #    ans = intra_model.predict_proba(combined)
-                #    for classi in extra_classes:
-                #        row.append(0.0)
-                #    for classi in intra_classes:
-                #        row.append(ans[:,index][0])
-                #        index = index + 1
-                #row.append(0.0) #class99
-                #lst.append(row)
-
-                print " >Starting new batch" + str(batch_no + 1)
+                print " >Starting new batch " + str(batch_no + 1)
                 batch_no = batch_no + 1
                 lst = 0
                 count = 0
-                finish = pd.DataFrame(columns=column_names)
+                my_extra_data_list = []
+                my_intra_data_list = []
 
             else:
                 count = count + 1
-                if(count == 2500):
-                    print "  >>25%..."
-                if(count == 5000):
-                    print "  >>50%..."
-                if(count == 7500):
-                    print "  >>75%..."
-            if(batch_no == 3):
-                break
+
+        print "!Remaining objects: " + str(count)
+        print " >>Formatting batch objects"
+        arr = my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_metadata_raw, extra_model, intra_model)
+
+        print " >>Write to csv"
+        finish = pd.DataFrame(arr, columns=column_names)
+        with open('predictions.csv', 'a') as f:
+            finish.to_csv(f, index = False, header=False)
+
+
+        print " >>Clean up."
+        preds = pd.read_csv('predictions.csv')
+        preds['object_id']=preds['object_id'].apply(int)
+	    #preds['object_id']=preds['object_id'].apply(int)
+        print preds.shape
+        print cc
+        preds.to_csv('predictions2.csv', index=False)
+	    #preds.to_csv('predictions2.csv', index=False)
+
         print "DONE."
 
 main()
