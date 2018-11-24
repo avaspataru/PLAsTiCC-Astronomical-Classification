@@ -24,18 +24,12 @@ def scale(dataFrame):
         df[c] = (df[c] - df[c].mean()) / df[c].std()
     return dataFrame
 
-#def scale(dataFrame):
-#    dataFrame_new = dataFrame.copy()
-#    ss = StandardScaler()
-#    gc.collect()
-#    return ss.fit_transform(dataFrame_new)
-
 
 def splitGalaxies(dataFrame, targets):
     print "Split extragalactic "
     extra = np.where(dataFrame['hostgal_photoz']==0.0)
     extragalactic_data = dataFrame.drop(dataFrame.index[extra])
-    extra_ids = extragalactic_data['object_id']
+    extra_ids = extragalactic_data['object_id'].values.tolist()
     extragalactic_data = extragalactic_data.drop('object_id',axis=1)
     extragalactic_targets = targets.drop(targets.index[extra])
 
@@ -43,13 +37,25 @@ def splitGalaxies(dataFrame, targets):
     print "Split intragalactic "
     intra = np.where(dataFrame['hostgal_photoz']!=0.0)
     intragalactic_data = dataFrame.drop(dataFrame.index[intra])
-    intra_ids = intragalactic_data['object_id']
+    intra_ids = intragalactic_data['object_id'].values.tolist()
     intragalactic_data = intragalactic_data.drop('object_id',axis=1)
     intragalactic_targets = targets.drop(targets.index[intra])
 
-    #return extragalactic_data, extragalactic_targets, extra_ids, intragalactic_data, intragalactic_targets, intra_ids
     return extragalactic_data, extragalactic_targets,extra_ids, intragalactic_data, intragalactic_targets, intra_ids
 
+
+def splitTestGalaxies(dataFrame):
+    print "Split extragalactic "
+    extra = np.where(dataFrame['hostgal_photoz']==0.0)
+    extragalactic_data = dataFrame.drop(dataFrame.index[extra])
+    extra_ids = extragalactic_data['object_id'].values.tolist()
+
+    print "Split intragalactic "
+    intra = np.where(dataFrame['hostgal_photoz']!=0.0)
+    intragalactic_data = dataFrame.drop(dataFrame.index[intra])
+    intra_ids = intragalactic_data['object_id'].values.tolist()
+
+    return extra_ids,intra_ids
 
 def format(set_metadata_raw, set_raw):
 
@@ -180,16 +186,14 @@ def my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_met
 
     batch_extra_dataFrame = pd.DataFrame(columns = formatted_columns)
     batch_intra_dataFrame = pd.DataFrame(columns = formatted_columns)
-
-    my_extra_meta_batch = pd.DataFrame(columns = test_set_metadata_raw.columns)
-    my_intra_meta_batch = pd.DataFrame(columns = test_set_metadata_raw.columns)
     my_extra_data_batch = pd.DataFrame(columns = ['object_id', 'mjd', 'passband', 'flux', 'flux_err', 'detected'])
     my_intra_data_batch = pd.DataFrame(columns = ['object_id', 'mjd', 'passband', 'flux', 'flux_err', 'detected'])
 
 
-
-    my_extra_data_batch = pd.concat(my_extra_data_list)
-    my_intra_data_batch = pd.concat(my_intra_data_list)
+    if(len(my_extra_data_list)>0):
+        my_extra_data_batch = pd.concat(my_extra_data_list)
+    if(len(my_intra_data_list)>0):
+        my_intra_data_batch = pd.concat(my_intra_data_list)
 
     tt1 = test_set_metadata_raw.loc[test_set_metadata_raw['object_id'].isin(my_extra_data_batch['object_id'].values.tolist())]
     if(len(my_extra_data_batch.index)>0):
@@ -208,7 +212,6 @@ def my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_met
     print " >>Predicting extra"
     if(len(batch_extra_dataFrame.index)>0):
         objids1 = batch_extra_dataFrame['object_id'].values.tolist()
-
         objids = []
         for id in objids1:
             l1 = [id]
@@ -305,6 +308,17 @@ def main():
 
         extra_classes = extra_model.classes_
         intra_classes = intra_model.classes_
+
+
+        extra_ids = []
+        intra_ids = []
+        extra_ids, intra_ids = splitTestGalaxies(test_set_metadata_raw)
+        #print "Extra ids"
+        #print extra_ids
+
+        #print "Intra_ids"
+        #print intra_ids
+
         column_names = []
         column_names.append('object_id')
         for classi in extra_classes:
@@ -315,7 +329,7 @@ def main():
             column_names.append(className)
         column_names.append("class_99")
 
-        print column_names
+        #print column_names
         count = 0
         batch_no = 0
         batch_extra_dataFrame = pd.DataFrame()
@@ -327,21 +341,23 @@ def main():
 
 
         print " >Starting new batch 0"
-
         my_extra_data_list = []
         my_intra_data_list = []
 
+        extra_idss = set(extra_ids)
+        intra_idss = set(intra_ids)
         cc=-1
         for obj_id, d in get_objects_by_id(filepath):
             cc=cc+1
             #combined = format(test_set_metadata_raw.loc[test_set_metadata_raw['object_id']==obj_id],d)
-            if (obj_id in extra_ids):
+            if (obj_id in extra_idss):
                 my_extra_data_list.append(d) # = np.append(my_extra_data_list, d)
             else:
                 my_intra_data_list.append(d) #= np.append(my_intra_data_list, d)
             if(count == 10000):
                 print " >>Formatting batch objects"
                 arr = my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_metadata_raw, extra_model, intra_model)
+
                 print " >>Write to csv"
                 finish = pd.DataFrame(arr, columns=column_names)
                 if(batch_no==0):
@@ -359,7 +375,6 @@ def main():
 
             else:
                 count = count + 1
-
         print "!Remaining objects: " + str(count)
         print " >>Formatting batch objects"
         arr = my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_metadata_raw, extra_model, intra_model)
