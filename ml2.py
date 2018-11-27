@@ -15,6 +15,11 @@ from sklearn import preprocessing
 from random import *
 from helper import standardizeData,normalizeData,equalProbabilities
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV
+from multiprocessing import Pool
+import multiprocessing as mp
+
+CORES = mp.cpu_count() #4
 
 def scale(dataFrame):
     df = dataFrame.copy()
@@ -24,10 +29,9 @@ def scale(dataFrame):
         df[c] = (df[c] - df[c].mean()) / df[c].std()
     return dataFrame
 
-
 def splitGalaxies(dataFrame, targets):
     print "Split extragalactic "
-    extra = np.where(dataFrame['hostgal_photoz']==0.0)
+    extra = np.where(dataFrame['hostgal_specz']==0.0)
     extragalactic_data = dataFrame.drop(dataFrame.index[extra])
     extra_ids = extragalactic_data['object_id'].values.tolist()
     extragalactic_data = extragalactic_data.drop('object_id',axis=1)
@@ -35,7 +39,7 @@ def splitGalaxies(dataFrame, targets):
 
 
     print "Split intragalactic "
-    intra = np.where(dataFrame['hostgal_photoz']!=0.0)
+    intra = np.where(dataFrame['hostgal_specz']!=0.0)
     intragalactic_data = dataFrame.drop(dataFrame.index[intra])
     intra_ids = intragalactic_data['object_id'].values.tolist()
     intragalactic_data = intragalactic_data.drop('object_id',axis=1)
@@ -43,15 +47,22 @@ def splitGalaxies(dataFrame, targets):
 
     return extragalactic_data, extragalactic_targets,extra_ids, intragalactic_data, intragalactic_targets, intra_ids
 
+# some help functions
+# angular frequency to period
+def freq2Period(w):
+    return 2 * math.pi / w
+# period to angular frequency
+def period2Freq(T):
+    return 2 * math.pi / T
 
 def splitTestGalaxies(dataFrame):
     print "Split extragalactic "
-    extra = np.where(dataFrame['hostgal_photoz']==0.0)
+    extra = np.where(dataFrame['hostgal_specz']==0.0)
     extragalactic_data = dataFrame.drop(dataFrame.index[extra])
     extra_ids = extragalactic_data['object_id'].values.tolist()
 
     print "Split intragalactic "
-    intra = np.where(dataFrame['hostgal_photoz']!=0.0)
+    intra = np.where(dataFrame['hostgal_specz']!=0.0)
     intragalactic_data = dataFrame.drop(dataFrame.index[intra])
     intra_ids = intragalactic_data['object_id'].values.tolist()
 
@@ -59,46 +70,106 @@ def splitTestGalaxies(dataFrame):
 
 def format(set_metadata_raw, set_raw):
 
-    set_metadata_raw = fill_in_hostgal_specz(set_metadata_raw)
     set_data = set_metadata_raw.drop('distmod',axis=1)
+    #set_raw['flux'] = set_raw['flux'] * set_data['mwebv']
+
+    set_data = set_data.drop('mwebv', axis=1)
 
     set_raw['flux_ratio_sq'] = np.power(set_raw['flux'] / set_raw['flux_err'], 2.0)
     set_raw['flux_by_flux_ratio_sq'] = set_raw['flux'] * set_raw['flux_ratio_sq']
 
     aggs = {
-    'mjd': ['min', 'max', 'size'],
-    'passband': ['min', 'max', 'mean', 'median', 'std'],
-    'flux': ['min', 'max', 'mean', 'median', 'std','skew'],
-    'flux_err': ['min', 'max', 'mean', 'median', 'std','skew'],
-    'detected': ['mean'],
-    'flux_ratio_sq':['sum','skew'],
-    'flux_by_flux_ratio_sq':['sum','skew'],
+    'flux': ['min', 'max', 'mean'],
+    'detected': ['max'],
+    'flux_ratio_sq':['sum'],
+    'flux_by_flux_ratio_sq':['mean'],
     }
 
-    agg_train = set_raw.groupby('object_id').agg(aggs)
+    agg_train = set_raw.groupby(['object_id','passband']).agg(aggs).reset_index()
 
-    new_columns = [
-    k + '_' + agg for k in aggs.keys() for agg in aggs[k]
-    ]
-    agg_train.columns = new_columns
-    agg_train['mjd_diff'] = agg_train['mjd_max'] - agg_train['mjd_min']
+    agg_train.columns = [name[0]+"_"+name[1] for name in agg_train.columns]
+
     agg_train['flux_diff'] = agg_train['flux_max'] - agg_train['flux_min']
     agg_train['flux_dif2'] = (agg_train['flux_max'] - agg_train['flux_min']) / agg_train['flux_mean']
-    agg_train['flux_w_mean'] = agg_train['flux_by_flux_ratio_sq_sum'] / agg_train['flux_ratio_sq_sum']
+    agg_train['flux_w_mean'] = agg_train['flux_by_flux_ratio_sq_mean'] / agg_train['flux_ratio_sq_sum']
     agg_train['flux_dif3'] = (agg_train['flux_max'] - agg_train['flux_min']) / agg_train['flux_w_mean']
 
-    del agg_train['mjd_max'], agg_train['mjd_min']
     agg_train.head()
 
     del set_raw
     gc.collect()
 
-    full_train = agg_train.reset_index().merge(
-    right=set_data, # this is without some cols
-    how='outer',
-    on='object_id'
-    )
+    full_train = agg_train
 
+    #merge the pass bands
+    cc = []
+    for coln in full_train.columns:
+        if(coln == 'object_id_'):
+            cc.append('object_id')
+        else:
+            c = coln + '_' + str(0)
+            cc.append(c)
+
+    p0 = full_train.loc[full_train['passband_'] == 0]
+    p0df = pd.DataFrame(p0.values,columns=cc)
+    p0df = p0df.drop('passband__0',axis=1)
+
+    cc = [
+    coln + '_' + str(1) for coln in full_train.columns
+    ]
+    p1 = full_train.loc[full_train['passband_'] == 1]
+    p1df = pd.DataFrame(p1.values,columns=cc)
+    p1df = p1df.drop('object_id__1',axis=1)
+    p1df = p1df.drop('passband__1',axis=1)
+
+    cc = [
+    coln + '_' + str(2) for coln in full_train.columns
+    ]
+    p2 = full_train.loc[full_train['passband_'] == 2]
+    p2df = pd.DataFrame(p2.values,columns=cc)
+    p2df = p2df.drop('object_id__2',axis=1)
+    p2df = p2df.drop('passband__2',axis=1)
+
+    cc = [
+    coln + '_' + str(3) for coln in full_train.columns
+    ]
+    p3 = full_train.loc[full_train['passband_'] == 3]
+    p3df = pd.DataFrame(p3.values,columns=cc)
+    p3df = p3df.drop('object_id__3',axis=1)
+    p3df = p3df.drop('passband__3',axis=1)
+
+    cc = [
+    coln + '_' + str(4) for coln in full_train.columns
+    ]
+    p4 = full_train.loc[full_train['passband_'] == 4]
+    p4df = pd.DataFrame(p4.values,columns=cc)
+    p4df = p4df.drop('object_id__4',axis=1)
+    p4df = p4df.drop('passband__4',axis=1)
+
+    cc = [
+    coln + '_' + str(5) for coln in full_train.columns
+    ]
+    p5 = full_train.loc[full_train['passband_'] == 5]
+    p5df = pd.DataFrame(p5.values,columns=cc)
+    p5df = p5df.drop('object_id__5',axis=1)
+    p5df = p5df.drop('passband__5',axis=1)
+
+    tog = pd.concat([p0df,p1df],axis=1)
+    tog = pd.concat([tog,p2df],axis =1)
+    tog = pd.concat([tog,p3df],axis =1)
+    tog = pd.concat([tog,p4df],axis =1)
+    tog = pd.concat([tog,p5df],axis =1)
+
+    #print new_columns
+    full_train = tog
+
+    full_train = full_train.reset_index().merge(
+        right=set_data,
+        how='outer',
+        on='object_id'
+        )
+    full_train= full_train.drop('index',axis=1)
+    #print full_train.columns
     return full_train
 
 def get_objects_by_id(path, chunksize=1000000):
@@ -166,21 +237,45 @@ def get_objects_by_id(path, chunksize=1000000):
 def fill_in_hostgal_specz(dataFrame):
     df = dataFrame.copy()
 
-    df['hostgal_specz'] = df['hostgal_photoz']
+    df.loc[df['hostgal_specz'].isnull(),'hostgal_specz'] = df['hostgal_photoz']
+
+    df = df.drop('hostgal_photoz',axis=1)
+    df = df.drop('hostgal_photoz_err',axis=1)
+    #df = df.drop('distmod',axis=1) already dropped
+    df = df.drop('ra',axis=1)
+    df = df.drop('decl',axis=1)
+    df = df.drop('gal_l',axis=1)
+    df = df.drop('gal_b',axis=1)
     return df
 
 def my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_metadata_raw, extra_model, intra_model):
 
-    formatted_columns = [u'object_id', u'mjd_size', u'flux_by_flux_ratio_sq_sum',
-   u'flux_by_flux_ratio_sq_skew', u'flux_ratio_sq_sum',
-   u'flux_ratio_sq_skew', u'flux_err_min', u'flux_err_max',
-   u'flux_err_mean', u'flux_err_median', u'flux_err_std', u'flux_err_skew',
-   u'flux_min', u'flux_max', u'flux_mean', u'flux_median', u'flux_std',
-   u'flux_skew', u'detected_mean', u'passband_min', u'passband_max',
-   u'passband_mean', u'passband_median', u'passband_std', u'mjd_diff',
-   u'flux_diff', u'flux_dif2', u'flux_w_mean', u'flux_dif3', u'ra',
-   u'decl', u'gal_l', u'gal_b', u'ddf', u'hostgal_specz',
-   u'hostgal_photoz', u'hostgal_photoz_err', u'mwebv']
+    formatted_columns = [u'object_id', u'flux_min_0', u'flux_max_0',
+       u'flux_mean_0', u'flux_std_0', u'detected_max_0',
+       u'flux_by_flux_ratio_sq_mean_0', u'flux_ratio_sq_sum_0',
+       u'flux_diff_0', u'flux_dif2_0', u'flux_w_mean_0', u'flux_dif3_0',
+       u'flux_min_1', u'flux_max_1', u'flux_mean_1',
+       u'flux_std_1', u'detected_max_1',
+       u'flux_by_flux_ratio_sq_mean_1', u'flux_ratio_sq_sum_1',
+       u'flux_diff_1', u'flux_dif2_1', u'flux_w_mean_1', u'flux_dif3_1',
+       u'flux_min_2', u'flux_max_2', u'flux_mean_2',
+       u'flux_std_2', u'detected_max_2',
+       u'flux_by_flux_ratio_sq_mean_2', u'flux_ratio_sq_sum_2',
+       u'flux_diff_2', u'flux_dif2_2', u'flux_w_mean_2', u'flux_dif3_2',
+       u'flux_min_3', u'flux_max_3', u'flux_mean_3',
+       u'flux_std_3', u'detected_max_3',
+       u'flux_by_flux_ratio_sq_mean_3', u'flux_ratio_sq_sum_3',
+       u'flux_diff_3', u'flux_dif2_3', u'flux_w_mean_3', u'flux_dif3_3',
+       u'flux_min_4', u'flux_max_4', u'flux_mean_4',
+       u'flux_std_4', u'detected_max_4',
+       u'flux_by_flux_ratio_sq_mean_4', u'flux_ratio_sq_sum_4',
+       u'flux_diff_4', u'flux_dif2_4', u'flux_w_mean_4', u'flux_dif3_4',
+       u'flux_min_5', u'flux_max_5', u'flux_mean_5',
+       u'flux_std_5', u'detected_max_5',
+       u'flux_by_flux_ratio_sq_mean_5', u'flux_ratio_sq_sum_5',
+       u'flux_diff_5', u'flux_dif2_5', u'flux_w_mean_5', u'flux_dif3_5',
+       u'ddf', u'hostgal_specz']
+
 
     finish = pd.DataFrame(columns=column_names)
 
@@ -205,6 +300,10 @@ def my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_met
         batch_intra_dataFrame= format(tt2, my_intra_data_batch)
     else:
         batch_intra_dataFrame = pd.DataFrame(columns = formatted_columns)
+
+    print "NULLS"
+    print batch_extra_dataFrame.columns[batch_extra_dataFrame.isnull().any()].tolist()
+    print batch_intra_dataFrame.columns[batch_intra_dataFrame.isnull().any()].tolist()
 
     extra_ans = []
     intra_ans = []
@@ -270,35 +369,42 @@ def main():
     for c in [64, 15]:
         class_weight[c] = 2
 
-
+    training_set_data = fill_in_hostgal_specz(training_set_data)
     full_train = format(training_set_data, training_set_raw)
     extragalactic_data, extragalactic_targets, extra_ids,  intragalactic_data, intragalactic_targets, intra_ids = splitGalaxies(full_train, training_set_targets)
 
+    print extragalactic_data.columns[extragalactic_data.isnull().any()].tolist()
+
     if mode==0:
         print "Model for extra:"
-        clf = RandomForestClassifier(n_jobs=2, random_state=0)
-        extragalactic_data = fill_in_hostgal_specz(extragalactic_data)
+        param_grid = {
+        'max_features': ['auto', 'sqrt', 'log2'],
+        'max_depth' : [4,5,6,7,8],
+        'criterion' :['gini', 'entropy']
+        }
+        clf = RandomForestClassifier(n_jobs=2, max_depth=20,n_estimators=100)
+        #CV_rfc = GridSearchCV(estimator=clf, param_grid=param_grid, cv= 5)
+        #CV_rfc.fit(extragalactic_data, extragalactic_targets)
+        #print "params"
+        #print CV_rfc.best_params_
         print cross_val_score(clf, extragalactic_data, extragalactic_targets, cv=10, scoring="neg_log_loss").mean()
 
         print "Model for intra:"
-        clf = RandomForestClassifier(n_jobs=2, random_state=0)
-        intragalactic_data = fill_in_hostgal_specz(intragalactic_data)
+        clf = RandomForestClassifier(n_jobs=2, max_depth=20,n_estimators=100)
         print cross_val_score(clf, intragalactic_data, intragalactic_targets, cv=10, scoring="neg_log_loss").mean()
 
         full_train_ids = full_train['object_id']
         full_train = full_train.drop('object_id', axis=1)
-        full_train = scale(full_train)
         print "Training model"
-        clf = RandomForestClassifier(n_jobs=2, random_state=0)
+        clf = RandomForestClassifier(n_jobs=2)
         #clf.fit(training_set_data, training_set_targets.values.ravel())
         print cross_val_score(clf, full_train, training_set_targets, cv=10, scoring="neg_log_loss").mean()
 
     else:
         print "Training"
-        extra_model = RandomForestClassifier(n_jobs=2)
+        extra_model = RandomForestClassifier(n_jobs=2, max_depth=20,n_estimators=100)
         extra_model.fit(extragalactic_data, extragalactic_targets.values.ravel())
-        intra_model = RandomForestClassifier(n_jobs=2)
-        intragalactic_data = fill_in_hostgal_specz(intragalactic_data)
+        intra_model = RandomForestClassifier(n_jobs=2, max_depth=20,n_estimators=100)
         intra_model.fit(intragalactic_data, intragalactic_targets.values.ravel())
         print "Finished training. Starting predictions"
 
@@ -312,12 +418,8 @@ def main():
 
         extra_ids = []
         intra_ids = []
+        test_set_metadata_raw = fill_in_hostgal_specz(test_set_metadata_raw)
         extra_ids, intra_ids = splitTestGalaxies(test_set_metadata_raw)
-        #print "Extra ids"
-        #print extra_ids
-
-        #print "Intra_ids"
-        #print intra_ids
 
         column_names = []
         column_names.append('object_id')
@@ -336,8 +438,6 @@ def main():
         batch_intra_dataFrame = pd.DataFrame()
         myextrabatchlist = []
         myintrabatchlist = []
-
-        test_set_metadata_raw = fill_in_hostgal_specz(test_set_metadata_raw)
 
 
         print " >Starting new batch 0"
@@ -360,6 +460,10 @@ def main():
 
                 print " >>Write to csv"
                 finish = pd.DataFrame(arr, columns=column_names)
+                finish["class_99"] = (1-finish.drop("object_id", axis=1)).product(axis=1) #Adding values to class_99
+                #Below is a very messy way of making all rows sum to 1 despite the above
+                finish.loc[:,finish.columns!="object_id"] = finish.loc[:,finish.columns!="object_id"].div(finish.loc[:,finish.columns!="object_id"].sum(axis=1), axis=0)
+
                 if(batch_no==0):
                     finish.to_csv("predictions.csv", index = False, header = True)
                 else:
@@ -381,6 +485,9 @@ def main():
 
         print " >>Write to csv"
         finish = pd.DataFrame(arr, columns=column_names)
+        finish["class_99"] = (1-finish.drop("object_id", axis=1)).product(axis=1) #Adding values to class_99
+        #Below is a very messy way of making all rows sum to 1 despite the above
+        finish.loc[:,finish.columns!="object_id"] = finish.loc[:,finish.columns!="object_id"].div(finish.loc[:,finish.columns!="object_id"].sum(axis=1), axis=0)
         with open('predictions.csv', 'a') as f:
             finish.to_csv(f, index = False, header=False)
 
