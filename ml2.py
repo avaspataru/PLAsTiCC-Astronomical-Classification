@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import scipy.signal as signal
 import operator
 import time
 import gc
@@ -18,6 +19,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import GridSearchCV
 from multiprocessing import Pool
 import multiprocessing as mp
+from gatspy.periodic import LombScargleFast
 
 CORES = mp.cpu_count() #4
 
@@ -34,7 +36,7 @@ def splitGalaxies(dataFrame, targets):
     extra = np.where(dataFrame['hostgal_specz']==0.0)
     extragalactic_data = dataFrame.drop(dataFrame.index[extra])
     extra_ids = extragalactic_data['object_id'].values.tolist()
-    extragalactic_data = extragalactic_data.drop('object_id',axis=1)
+    #extragalactic_data = extragalactic_data.drop('object_id',axis=1)
     extragalactic_targets = targets.drop(targets.index[extra])
 
 
@@ -42,18 +44,10 @@ def splitGalaxies(dataFrame, targets):
     intra = np.where(dataFrame['hostgal_specz']!=0.0)
     intragalactic_data = dataFrame.drop(dataFrame.index[intra])
     intra_ids = intragalactic_data['object_id'].values.tolist()
-    intragalactic_data = intragalactic_data.drop('object_id',axis=1)
+    #intragalactic_data = intragalactic_data.drop('object_id',axis=1)
     intragalactic_targets = targets.drop(targets.index[intra])
 
     return extragalactic_data, extragalactic_targets,extra_ids, intragalactic_data, intragalactic_targets, intra_ids
-
-# some help functions
-# angular frequency to period
-def freq2Period(w):
-    return 2 * math.pi / w
-# period to angular frequency
-def period2Freq(T):
-    return 2 * math.pi / T
 
 def splitTestGalaxies(dataFrame):
     print "Split extragalactic "
@@ -70,10 +64,11 @@ def splitTestGalaxies(dataFrame):
 
 def format(set_metadata_raw, set_raw):
 
-    set_data = set_metadata_raw.drop('distmod',axis=1)
+    print "BEGIN FORMAT -----"
+    #set_data = set_metadata_raw.drop('distmod',axis=1)
     #set_raw['flux'] = set_raw['flux'] * set_data['mwebv']
 
-    set_data = set_data.drop('mwebv', axis=1)
+    set_data = set_metadata_raw.drop('mwebv', axis=1)
 
     set_raw['flux_ratio_sq'] = np.power(set_raw['flux'] / set_raw['flux_err'], 2.0)
     set_raw['flux_by_flux_ratio_sq'] = set_raw['flux'] * set_raw['flux_ratio_sq']
@@ -82,7 +77,7 @@ def format(set_metadata_raw, set_raw):
     'flux': ['min', 'max', 'mean'],
     'detected': ['max'],
     'flux_ratio_sq':['sum'],
-    'flux_by_flux_ratio_sq':['mean'],
+    'flux_by_flux_ratio_sq':['mean']
     }
 
     agg_train = set_raw.groupby(['object_id','passband']).agg(aggs).reset_index()
@@ -101,6 +96,8 @@ def format(set_metadata_raw, set_raw):
 
     full_train = agg_train
 
+    full_train['magn'] = -2.5*full_train["flux_mean"].apply(np.log)
+    #print full_train.columns
     #merge the pass bands
     cc = []
     for coln in full_train.columns:
@@ -169,7 +166,32 @@ def format(set_metadata_raw, set_raw):
         on='object_id'
         )
     full_train= full_train.drop('index',axis=1)
+
+    full_train.loc[full_train['magn_0'].isnull(),'magn_0'] = 0 #abs mag should be 0 if no flux ?
+    full_train.loc[full_train['magn_1'].isnull(),'magn_1'] = 0
+    full_train.loc[full_train['magn_2'].isnull(),'magn_2'] = 0
+    full_train.loc[full_train['magn_3'].isnull(),'magn_3'] = 0
+    full_train.loc[full_train['magn_4'].isnull(),'magn_4'] = 0
+    full_train.loc[full_train['magn_5'].isnull(),'magn_5'] = 0
+    full_train['absmagn_0'] = full_train['magn_0'] - full_train['distmod']
+    full_train['absmagn_1'] = full_train['magn_1'] - full_train['distmod']
+    full_train['absmagn_2'] = full_train['magn_2'] - full_train['distmod']
+    full_train['absmagn_3'] = full_train['magn_3'] - full_train['distmod']
+    full_train['absmagn_4'] = full_train['magn_4'] - full_train['distmod']
+    full_train['absmagn_5'] = full_train['magn_5'] - full_train['distmod']
+
+    full_train.loc[full_train['magn_0'] == 0,'absmagn_0'] = 0 #abs mag should be 0 if no flux ?
+    full_train.loc[full_train['magn_1'] == 0,'absmagn_1'] = 0
+    full_train.loc[full_train['magn_2'] == 0,'absmagn_2'] = 0
+    full_train.loc[full_train['magn_3'] == 0,'absmagn_3'] = 0
+    full_train.loc[full_train['magn_4'] == 0,'absmagn_4'] = 0
+    full_train.loc[full_train['magn_5'] == 0,'absmagn_5'] = 0
+
+
+
+    full_train = full_train.drop('distmod',axis=1)
     #print full_train.columns
+
     return full_train
 
 def get_objects_by_id(path, chunksize=1000000):
@@ -233,6 +255,38 @@ def get_objects_by_id(path, chunksize=1000000):
     # yield remaining object
     yield (last_id, last_df)
 
+def do_periods(set_raw):
+    unqobjid = set_raw['object_id'].unique()
+    cou = 0
+    ccols = ['object_id','period_0','period_1','period_2','period_3','period_4','period_5']
+    periods_list = []
+    for ob in unqobjid:
+        if cou%500 == 0:
+            print "COUNT " + str(cou)
+        thisobjper = [ob]
+        for passb in range(0,6):
+            obdf = set_raw.loc[set_raw['object_id'] == ob]
+            obdf = obdf.loc[obdf['passband'] == passb]
+
+            x = np.array(obdf['mjd'].values.tolist())
+            y = np.array(obdf['flux'].values.tolist())
+            #model = LombScargleFast(fit_period=True)
+            #t_min = max(np.median(np.diff(sorted(obdf['mjd']))), 0.1)
+            #t_max = min(10., (obdf['mjd'].max() - obdf['mjd'].min())/2.)
+            f = np.array([0.5,33,0.5])
+            pgram = signal.lombscargle(x, y, f)
+            period = np.max(pgram)
+            #print "Period " + str(period)
+            #model.optimizer.set(period_range=(t_min, t_max))
+            #model.fit(obdf['mjd'], obdf['flux'], dy=obdf['flux_err'])
+            #period = model.best_period
+            thisobjper.append(period)
+        cou = cou + 1
+        periods_list.append(thisobjper)
+
+    periods = pd.DataFrame(periods_list,columns=ccols)
+    periods.to_csv('periods_train.csv', index=False)
+    return periods
 
 def fill_in_hostgal_specz(dataFrame):
     df = dataFrame.copy()
@@ -274,7 +328,10 @@ def my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_met
        u'flux_std_5', u'detected_max_5',
        u'flux_by_flux_ratio_sq_mean_5', u'flux_ratio_sq_sum_5',
        u'flux_diff_5', u'flux_dif2_5', u'flux_w_mean_5', u'flux_dif3_5',
-       u'ddf', u'hostgal_specz']
+       u'ddf', u'hostgal_specz', u'period_0', u'period_1', u'period_2', u'period_3',
+       u'period_4', u'period_5', u'magn_0', u'magn_1', u'magn_2', u'magn_3',
+       u'magn_4', u'magn_5', u'absmagn_0', u'absmagn_1', u'absmagn_2', u'absmagn_3',
+       u'absmagn_4', u'absmagn_5']
 
 
     finish = pd.DataFrame(columns=column_names)
@@ -289,6 +346,15 @@ def my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_met
         my_extra_data_batch = pd.concat(my_extra_data_list)
     if(len(my_intra_data_list)>0):
         my_intra_data_batch = pd.concat(my_intra_data_list)
+
+    initial_intra = my_intra_data_batch
+    intra_periods = do_periods(initial_intra)
+    intra_periods['period_0'] = (intra_periods['period_0']-intra_periods['period_0'].mean()) / intra_periods['period_0'].std()
+    intra_periods['period_1'] = (intra_periods['period_1']-intra_periods['period_1'].mean()) / intra_periods['period_1'].std()
+    intra_periods['period_2'] = (intra_periods['period_2']-intra_periods['period_2'].mean()) / intra_periods['period_2'].std()
+    intra_periods['period_3'] = (intra_periods['period_3']-intra_periods['period_3'].mean()) / intra_periods['period_3'].std()
+    intra_periods['period_4'] = (intra_periods['period_4']-intra_periods['period_4'].mean()) / intra_periods['period_4'].std()
+    intra_periods['period_5'] = (intra_periods['period_5']-intra_periods['period_5'].mean()) / intra_periods['period_5'].std()
 
     tt1 = test_set_metadata_raw.loc[test_set_metadata_raw['object_id'].isin(my_extra_data_batch['object_id'].values.tolist())]
     if(len(my_extra_data_batch.index)>0):
@@ -329,6 +395,59 @@ def my_predict(column_names,my_extra_data_list, my_intra_data_list, test_set_met
         for id in objids1:
             l1 = [id]
             objids.append(l1)
+        batch_intra_dataFrame = batch_intra_dataFrame.merge(
+            right=intra_periods,
+            how='outer',
+            on='object_id'
+            )
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('magn_0', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('magn_1', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('magn_2', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('magn_3', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('magn_4', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('magn_5', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('absmagn_0', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('absmagn_1', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('absmagn_2', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('absmagn_3', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('absmagn_4', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('absmagn_5', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_diff_0', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_diff_1', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_diff_2', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_diff_3', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_diff_4', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_diff_5', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif2_0', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif2_1', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif2_2', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif2_3', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif2_4', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif2_5', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif3_0', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif3_1', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif3_2', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif3_3', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif3_4', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_dif3_5', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_w_mean_0', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_w_mean_1', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_w_mean_2', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_w_mean_3', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_w_mean_4', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_w_mean_5', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_ratio_sq_sum_0', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_ratio_sq_sum_1', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_ratio_sq_sum_2', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_ratio_sq_sum_3', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_ratio_sq_sum_4', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_ratio_sq_sum_5', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_by_flux_ratio_sq_mean_0', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_by_flux_ratio_sq_mean_1', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_by_flux_ratio_sq_mean_2', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_by_flux_ratio_sq_mean_3', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_by_flux_ratio_sq_mean_4', axis = 1)
+        batch_intra_dataFrame = batch_intra_dataFrame.drop('flux_by_flux_ratio_sq_mean_5', axis = 1)
         batch_intra_dataFrame = batch_intra_dataFrame.drop('object_id', axis=1)
         intra_ans = intra_model.predict_proba(batch_intra_dataFrame)
         #print intra_model.classes_
@@ -373,7 +492,75 @@ def main():
     full_train = format(training_set_data, training_set_raw)
     extragalactic_data, extragalactic_targets, extra_ids,  intragalactic_data, intragalactic_targets, intra_ids = splitGalaxies(full_train, training_set_targets)
 
-    print extragalactic_data.columns[extragalactic_data.isnull().any()].tolist()
+    initial_intra = training_set_raw.loc[training_set_raw['object_id'].isin(intra_ids)]
+    intra_periods = do_periods(initial_intra)
+    #intra_periods = pd.read_csv('./periods_train.csv')
+    intra_periods['period_0'] = (intra_periods['period_0']-intra_periods['period_0'].mean()) / intra_periods['period_0'].std()
+    intra_periods['period_1'] = (intra_periods['period_1']-intra_periods['period_1'].mean()) / intra_periods['period_1'].std()
+    intra_periods['period_2'] = (intra_periods['period_2']-intra_periods['period_2'].mean()) / intra_periods['period_2'].std()
+    intra_periods['period_3'] = (intra_periods['period_3']-intra_periods['period_3'].mean()) / intra_periods['period_3'].std()
+    intra_periods['period_4'] = (intra_periods['period_4']-intra_periods['period_4'].mean()) / intra_periods['period_4'].std()
+    intra_periods['period_5'] = (intra_periods['period_5']-intra_periods['period_5'].mean()) / intra_periods['period_5'].std()
+
+    initial_extra = training_set_raw.loc[training_set_raw['object_id'].isin(extra_ids)]
+
+    intragalactic_data = intragalactic_data.merge(
+        right=intra_periods,
+        how='outer',
+        on='object_id'
+        )
+    #print intragalactic_data
+    intragalactic_data = intragalactic_data.drop('object_id',axis=1)
+    intragalactic_data = intragalactic_data.drop('magn_0', axis = 1)
+    intragalactic_data = intragalactic_data.drop('magn_1', axis = 1)
+    intragalactic_data = intragalactic_data.drop('magn_2', axis = 1)
+    intragalactic_data = intragalactic_data.drop('magn_3', axis = 1)
+    intragalactic_data = intragalactic_data.drop('magn_4', axis = 1)
+    intragalactic_data = intragalactic_data.drop('magn_5', axis = 1)
+    intragalactic_data = intragalactic_data.drop('absmagn_0', axis = 1)
+    intragalactic_data = intragalactic_data.drop('absmagn_1', axis = 1)
+    intragalactic_data = intragalactic_data.drop('absmagn_2', axis = 1)
+    intragalactic_data = intragalactic_data.drop('absmagn_3', axis = 1)
+    intragalactic_data = intragalactic_data.drop('absmagn_4', axis = 1)
+    intragalactic_data = intragalactic_data.drop('absmagn_5', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_diff_0', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_diff_1', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_diff_2', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_diff_3', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_diff_4', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_diff_5', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif2_0', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif2_1', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif2_2', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif2_3', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif2_4', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif2_5', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif3_0', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif3_1', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif3_2', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif3_3', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif3_4', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_dif3_5', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_w_mean_0', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_w_mean_1', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_w_mean_2', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_w_mean_3', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_w_mean_4', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_w_mean_5', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_ratio_sq_sum_0', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_ratio_sq_sum_1', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_ratio_sq_sum_2', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_ratio_sq_sum_3', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_ratio_sq_sum_4', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_ratio_sq_sum_5', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_by_flux_ratio_sq_mean_0', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_by_flux_ratio_sq_mean_1', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_by_flux_ratio_sq_mean_2', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_by_flux_ratio_sq_mean_3', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_by_flux_ratio_sq_mean_4', axis = 1)
+    intragalactic_data = intragalactic_data.drop('flux_by_flux_ratio_sq_mean_5', axis = 1)
+
+    extragalactic_data = extragalactic_data.drop('object_id',axis=1)
 
     if mode==0:
         print "Model for extra:"
@@ -390,15 +577,8 @@ def main():
         print cross_val_score(clf, extragalactic_data, extragalactic_targets, cv=10, scoring="neg_log_loss").mean()
 
         print "Model for intra:"
-        clf = RandomForestClassifier(n_jobs=2, max_depth=20,n_estimators=100)
+        clf = RandomForestClassifier(n_jobs=2, max_depth=15,n_estimators=100)
         print cross_val_score(clf, intragalactic_data, intragalactic_targets, cv=10, scoring="neg_log_loss").mean()
-
-        full_train_ids = full_train['object_id']
-        full_train = full_train.drop('object_id', axis=1)
-        print "Training model"
-        clf = RandomForestClassifier(n_jobs=2)
-        #clf.fit(training_set_data, training_set_targets.values.ravel())
-        print cross_val_score(clf, full_train, training_set_targets, cv=10, scoring="neg_log_loss").mean()
 
     else:
         print "Training"
@@ -415,11 +595,11 @@ def main():
         extra_classes = extra_model.classes_
         intra_classes = intra_model.classes_
 
-
         extra_ids = []
         intra_ids = []
         test_set_metadata_raw = fill_in_hostgal_specz(test_set_metadata_raw)
         extra_ids, intra_ids = splitTestGalaxies(test_set_metadata_raw)
+
 
         column_names = []
         column_names.append('object_id')
